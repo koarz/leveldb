@@ -17,6 +17,7 @@ class MemTable;
 class WriteBatchInternal {
  public:
   // Return the number of entries in the batch.
+  // Count 就是计算键值的长度和再加上储存的两个 length 的大小也就是 8
   static int Count(const WriteBatch* batch);
 
   // Set the count for the number of entries in the batch.

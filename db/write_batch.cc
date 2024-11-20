@@ -40,20 +40,25 @@ void WriteBatch::Clear() {
 size_t WriteBatch::ApproximateSize() const { return rep_.size(); }
 
 Status WriteBatch::Iterate(Handler* handler) const {
+  // WriteBatchInternal 的 InsertInto 函数会构造一个 MemTableInserter 对象，再通过这个对象调用该函数
+  // MemTableInserter 的 Put 是向 memtable 插入 Slice
   Slice input(rep_);
   if (input.size() < kHeader) {
     return Status::Corruption("malformed WriteBatch (too small)");
   }
 
+  // input 现在指向 ValueType
   input.remove_prefix(kHeader);
   Slice key, value;
   int found = 0;
   while (!input.empty()) {
     found++;
     char tag = input[0];
+    // input 指向 key
     input.remove_prefix(1);
     switch (tag) {
       case kTypeValue:
+        // GetLengthPrefixedSlice 函数会在读取数据后将 input 的 data 指针后移
         if (GetLengthPrefixedSlice(&input, &key) &&
             GetLengthPrefixedSlice(&input, &value)) {
           handler->Put(key, value);
