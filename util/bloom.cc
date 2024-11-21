@@ -3,8 +3,8 @@
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
 #include "leveldb/filter_policy.h"
-
 #include "leveldb/slice.h"
+
 #include "util/hash.h"
 
 namespace leveldb {
@@ -27,23 +27,30 @@ class BloomFilterPolicy : public FilterPolicy {
 
   void CreateFilter(const Slice* keys, int n, std::string* dst) const override {
     // Compute bloom filter size (in both bits and bytes)
+    // bits_per_key_：为每个键分配的位数，决定了布隆过滤器的大小和误判率。更多位数通常会降低误判率，但增加内存消耗。
     size_t bits = n * bits_per_key_;
 
     // For small n, we can see a very high false positive rate.  Fix it
     // by enforcing a minimum bloom filter length.
+    // 如果计算出的 bits 小于 64（位数不足），则强制布隆过滤器最小大小为 64
+    // 位，避免误判率过高。
     if (bits < 64) bits = 64;
 
+    // 将位数转为字节数（每字节 8 位）。
     size_t bytes = (bits + 7) / 8;
+    // 确保位数对齐为完整字节。
     bits = bytes * 8;
 
     const size_t init_size = dst->size();
     dst->resize(init_size + bytes, 0);
+    // 将探测次数 k_ 保存到过滤器末尾（记住多少次哈希操作），方便读取时还原。
     dst->push_back(static_cast<char>(k_));  // Remember # of probes in filter
     char* array = &(*dst)[init_size];
     for (int i = 0; i < n; i++) {
       // Use double-hashing to generate a sequence of hash values.
       // See analysis in [Kirsch,Mitzenmacher 2006].
       uint32_t h = BloomHash(keys[i]);
+      // 计算一次哈希值后再做一次位操作得到最终值
       const uint32_t delta = (h >> 17) | (h << 15);  // Rotate right 17 bits
       for (size_t j = 0; j < k_; j++) {
         const uint32_t bitpos = h % bits;
