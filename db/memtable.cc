@@ -3,14 +3,18 @@
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
 #include "db/memtable.h"
+
 #include "db/dbformat.h"
+
 #include "leveldb/comparator.h"
 #include "leveldb/env.h"
 #include "leveldb/iterator.h"
+
 #include "util/coding.h"
 
 namespace leveldb {
 
+// 这个函数读取 len 并返回 Slice 对象
 static Slice GetLengthPrefixedSlice(const char* data) {
   uint32_t len;
   const char* p = data;
@@ -43,6 +47,7 @@ static const char* EncodeKey(std::string* scratch, const Slice& target) {
   return scratch->data();
 }
 
+// skiplist 储存的都是 internalkey 所以 memtable 对 skiplist::iterator 做了封装
 class MemTableIterator : public Iterator {
  public:
   explicit MemTableIterator(MemTable::Table* table) : iter_(table) {}
@@ -61,6 +66,7 @@ class MemTableIterator : public Iterator {
   Slice key() const override { return GetLengthPrefixedSlice(iter_.key()); }
   Slice value() const override {
     Slice key_slice = GetLengthPrefixedSlice(iter_.key());
+    // 内存上是连续的直接算 offset
     return GetLengthPrefixedSlice(key_slice.data() + key_slice.size());
   }
 
@@ -83,11 +89,16 @@ void MemTable::Add(SequenceNumber s, ValueType type, const Slice& key,
   //  value bytes  : char[value.size()]
   size_t key_size = key.size();
   size_t val_size = value.size();
+  // 这个 +8 就是上边注释的 tag 占用内存
   size_t internal_key_size = key_size + 8;
   const size_t encoded_len = VarintLength(internal_key_size) +
                              internal_key_size + VarintLength(val_size) +
                              val_size;
+  // Slice 要求 data 生命周期足够长
+  // 这里是生成了副本内存由 Arena 管理
   char* buf = arena_.Allocate(encoded_len);
+  // 这里开始相当于写 InternalKey 因为 leveldb 的 skiplist 不支持 KV 对
+  // Varint32: 7 字节数据 + 1 字节标志 表示这是个 Varint 值
   char* p = EncodeVarint32(buf, internal_key_size);
   std::memcpy(p, key.data(), key_size);
   p += key_size;
@@ -96,6 +107,7 @@ void MemTable::Add(SequenceNumber s, ValueType type, const Slice& key,
   p = EncodeVarint32(p, val_size);
   std::memcpy(p, value.data(), val_size);
   assert(p + val_size == buf + encoded_len);
+
   table_.Insert(buf);
 }
 
