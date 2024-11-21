@@ -8,11 +8,6 @@
 #ifndef __Fuchsia__
 #include <sys/resource.h>
 #endif
-#include <sys/stat.h>
-#include <sys/time.h>
-#include <sys/types.h>
-#include <unistd.h>
-
 #include <atomic>
 #include <cerrno>
 #include <cstddef>
@@ -24,13 +19,18 @@
 #include <queue>
 #include <set>
 #include <string>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/types.h>
 #include <thread>
 #include <type_traits>
+#include <unistd.h>
 #include <utility>
 
 #include "leveldb/env.h"
 #include "leveldb/slice.h"
 #include "leveldb/status.h"
+
 #include "port/port.h"
 #include "port/thread_annotations.h"
 #include "util/env_posix_test_helper.h"
@@ -70,6 +70,7 @@ Status PosixError(const std::string& context, int error_number) {
 // Currently used to limit read-only file descriptors and mmap file usage
 // so that we do not run out of file descriptors or virtual memory, or run into
 // kernel performance problems for very large databases.
+// limiter 做的只是维护一个 acquires_allowed_ 原子变量，判断资源数是否够用
 class Limiter {
  public:
   // Limit maximum number of resources to |max_acquires|.
@@ -87,6 +88,9 @@ class Limiter {
 
   // If another resource is available, acquire it and return true.
   // Else return false.
+  // 在并发条件下，fetch_sub 原子地将可请求资源数 -1 并返回原值
+  // 也就是说只要可请求资源大于 0 那么都能安全获取，即使最后这个值成负数
+  // 后边也会加回来，不过直接 -- 应该也可以
   bool Acquire() {
     int old_acquires_allowed =
         acquires_allowed_.fetch_sub(1, std::memory_order_relaxed);
@@ -133,12 +137,15 @@ class Limiter {
 //
 // Instances of this class are thread-friendly but not thread-safe, as required
 // by the SequentialFile API.
+// QUES 为啥这玩意没有 Limit*
 class PosixSequentialFile final : public SequentialFile {
  public:
   PosixSequentialFile(std::string filename, int fd)
       : fd_(fd), filename_(std::move(filename)) {}
   ~PosixSequentialFile() override { close(fd_); }
 
+  // 用系统函数 read 将文件数据读到 scratch 里，再将数据储存在 result 里
+  // COMMON：在 result 的生命周期内 scratch 对应数据应该是不可变的
   Status Read(size_t n, Slice* result, char* scratch) override {
     Status status;
     while (true) {
@@ -156,6 +163,7 @@ class PosixSequentialFile final : public SequentialFile {
     return status;
   }
 
+  // 通过 seek 调整位置文件指示器后移
   Status Skip(uint64_t n) override {
     if (::lseek(fd_, n, SEEK_CUR) == static_cast<off_t>(-1)) {
       return PosixError(filename_, errno);
@@ -196,6 +204,7 @@ class PosixRandomAccessFile final : public RandomAccessFile {
     }
   }
 
+  // 使用 pread 读取数据，pread 就是提供位置（offset）的 read 函数
   Status Read(uint64_t offset, size_t n, Slice* result,
               char* scratch) const override {
     int fd = fd_;
@@ -235,6 +244,7 @@ class PosixRandomAccessFile final : public RandomAccessFile {
 // Instances of this class are thread-safe, as required by the RandomAccessFile
 // API. Instances are immutable and Read() only calls thread-safe library
 // functions.
+// 维护通过 mmap 获取的指针，析构时自动调用 munmap 需要调用者使用 mmap
 class PosixMmapReadableFile final : public RandomAccessFile {
  public:
   // mmap_base[0, length-1] points to the memory-mapped contents of the file. It
@@ -290,6 +300,9 @@ class PosixWritableFile final : public WritableFile {
     }
   }
 
+  // append 会将超过 Buffer 容量的部分截断，如果 buffer 满了就刷新缓存
+  // 如果刷新后的大小还是太大（超过65536）那么就不再写入缓冲区，使用
+  // WriteUnBuffer 函数将剩余数据写入文件
   Status Append(const Slice& data) override {
     size_t write_size = data.size();
     const char* write_data = data.data();
@@ -357,6 +370,7 @@ class PosixWritableFile final : public WritableFile {
     return status;
   }
 
+  // 将 buffer 数据写入文件里
   Status WriteUnbuffered(const char* data, size_t size) {
     while (size > 0) {
       ssize_t write_result = ::write(fd_, data, size);
@@ -394,6 +408,9 @@ class PosixWritableFile final : public WritableFile {
   //
   // The path argument is only used to populate the description string in the
   // returned Status if an error occurs.
+  // 确保清单（manifest）中引用的新文件已存在于文件系统中。
+  // 这一操作必须在将清单文件刷新到磁盘之前完成，
+  // 以避免出现一种情况：清单中引用了尚未写入磁盘的文件，导致程序崩溃。
   static Status SyncFd(int fd, const std::string& fd_path) {
 #if HAVE_FULLFSYNC
     // On macOS and iOS, fsync() doesn't guarantee durability past power
@@ -476,6 +493,7 @@ int LockOrUnlock(int fd, bool lock) {
 }
 
 // Instances are thread-safe because they are immutable.
+// 保存文件名和文件描述符
 class PosixFileLock : public FileLock {
  public:
   PosixFileLock(int fd, std::string filename)
@@ -498,6 +516,7 @@ class PosixFileLock : public FileLock {
 // Instances are thread-safe because all member data is guarded by a mutex.
 class PosixLockTable {
  public:
+  // 使用 set 维护锁集，如果 Insert 了一个已经在锁集里的那么会返回 false
   bool Insert(const std::string& fname) LOCKS_EXCLUDED(mu_) {
     mu_.Lock();
     bool succeeded = locked_files_.insert(fname).second;
@@ -525,6 +544,7 @@ class PosixEnv : public Env {
     std::abort();
   }
 
+  // 返回一个新的可以顺序读取文件的对象
   Status NewSequentialFile(const std::string& filename,
                            SequentialFile** result) override {
     int fd = ::open(filename.c_str(), O_RDONLY | kOpenBaseFlags);
@@ -537,6 +557,7 @@ class PosixEnv : public Env {
     return Status::OK();
   }
 
+  // 返回一个可随机访问的文件对象，需要向 Limit 请求资源
   Status NewRandomAccessFile(const std::string& filename,
                              RandomAccessFile** result) override {
     *result = nullptr;
@@ -545,7 +566,10 @@ class PosixEnv : public Env {
       return PosixError(filename, errno);
     }
 
+    // 优先请求 mmap 资源
     if (!mmap_limiter_.Acquire()) {
+      // 为什么这里能直接 new 一个 Limiter 是 fd_limiter_ 的？
+      // 也就是说直接 open 的资源不受限制？毕竟只对 fd_limiter 做释放
       *result = new PosixRandomAccessFile(filename, fd, &fd_limiter_);
       return Status::OK();
     }
@@ -563,6 +587,7 @@ class PosixEnv : public Env {
         status = PosixError(filename, errno);
       }
     }
+    // 如果获取文件大小失败那么释放资源
     ::close(fd);
     if (!status.ok()) {
       mmap_limiter_.Release();
@@ -570,6 +595,7 @@ class PosixEnv : public Env {
     return status;
   }
 
+  // 这个函数和下边的函数区别只有 open 需要的权限
   Status NewWritableFile(const std::string& filename,
                          WritableFile** result) override {
     int fd = ::open(filename.c_str(),
@@ -600,6 +626,7 @@ class PosixEnv : public Env {
     return ::access(filename.c_str(), F_OK) == 0;
   }
 
+  // 获取当前文件夹的所有子文件
   Status GetChildren(const std::string& directory_path,
                      std::vector<std::string>* result) override {
     result->clear();
@@ -653,6 +680,8 @@ class PosixEnv : public Env {
     return Status::OK();
   }
 
+  // 通过维护一个锁集判断 Lock是否可以获取锁
+  // 如果可以获取才会尝试通过系统调用获取文件锁
   Status LockFile(const std::string& filename, FileLock** lock) override {
     *lock = nullptr;
 
@@ -832,6 +861,7 @@ void PosixEnv::Schedule(
   background_work_mutex_.Unlock();
 }
 
+// 后台线程等待工作运行，运行后台工作
 void PosixEnv::BackgroundThreadMain() {
   while (true) {
     background_work_mutex_.Lock();
