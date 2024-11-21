@@ -38,19 +38,40 @@ namespace {
 // when they detect an element in the cache acquiring or losing its only
 // external reference.
 
+// LRU（最近最少使用）缓存实现
+//
+// 缓存条目有一个布尔变量 in_cache，用于指示缓存是否持有该条目的引用。
+// in_cache 变为 false 而未触发条目传递给其 "deleter" 的情况只有以下几种：
+// 1. 调用 Erase()；
+// 2. 在调用 Insert() 时插入了一个具有重复键的条目；
+// 3. 缓存被销毁。
+//
+// 缓存中维护了两个链表，这些链表包含了所有在缓存中的条目，每个条目只会存在于其中一个链表中，且不会同时存在于两个链表中。
+// 被客户端引用但从缓存中删除的条目不会出现在任何一个链表中。这两个链表是：
+// - in-use 列表：包含所有当前被客户端引用的条目，顺序不固定。
+// （此列表主要用于不变性检查。如果移除了这些检查，本该在此列表中的元素可能会变成孤立的单节点列表。）
+// - LRU 列表：包含所有未被客户端引用的条目，按照最近最少使用的顺序排列。
+//
+// 条目在这两个列表之间的移动由 Ref() 和 Unref() 方法完成，
+// 这些方法会在条目在缓存中获取或失去其唯一的外部引用时执行操作。
+
 // An entry is a variable length heap-allocated structure.  Entries
 // are kept in a circular doubly linked list ordered by access time.
+// 缓存条目是一个长度可变的堆分配结构。
+// 条目按访问时间的顺序存储在一个循环双向链表中。
 struct LRUHandle {
   void* value;
   void (*deleter)(const Slice&, void* value);
+  // hash 值相同的下一个节点
   LRUHandle* next_hash;
   LRUHandle* next;
   LRUHandle* prev;
   size_t charge;  // TODO(opt): Only allow uint32_t?
   size_t key_length;
-  bool in_cache;     // Whether entry is in the cache.
-  uint32_t refs;     // References, including cache reference, if present.
-  uint32_t hash;     // Hash of key(); used for fast sharding and comparisons
+  bool in_cache;  // Whether entry is in the cache.
+  uint32_t refs;  // References, including cache reference, if present.
+  uint32_t hash;  // Hash of key(); used for fast sharding and comparisons
+  // 柔性数组，在 new 一个 LRUHandle 的时候会将这部分内存分配好，不需要担心溢出
   char key_data[1];  // Beginning of key
 
   Slice key() const {
@@ -67,20 +88,25 @@ struct LRUHandle {
 // table implementations in some of the compiler/runtime combinations
 // we have tested.  E.g., readrandom speeds up by ~5% over the g++
 // 4.4.3's builtin hashtable.
+// 我们提供了一个简单的自定义哈希表，因为这样可以避免大量的移植问题，并且在我们测试的一些编译器/运行时组合中，这种实现比某些内置哈希表更快。
+// 例如，在 g++ 4.4.3 的内置哈希表上，`readrandom` 的性能提升了约 5%。
 class HandleTable {
  public:
   HandleTable() : length_(0), elems_(0), list_(nullptr) { Resize(); }
   ~HandleTable() { delete[] list_; }
 
+  // 查询
   LRUHandle* Lookup(const Slice& key, uint32_t hash) {
     return *FindPointer(key, hash);
   }
 
+  // Insert 将 h 插入（更新）哈希表里并返回原 key 对应的 handle
   LRUHandle* Insert(LRUHandle* h) {
     LRUHandle** ptr = FindPointer(h->key(), h->hash);
     LRUHandle* old = *ptr;
     h->next_hash = (old == nullptr ? nullptr : old->next_hash);
     *ptr = h;
+    // 说明这个 lruhandle 之前不在表中
     if (old == nullptr) {
       ++elems_;
       if (elems_ > length_) {
@@ -192,6 +218,7 @@ class LRUCache {
   // Entries are in use by clients, and have refs >= 2 and in_cache==true.
   LRUHandle in_use_ GUARDED_BY(mutex_);
 
+  // 储存 LRUHandle 的 leveldb 自己实现的哈希表
   HandleTable table_ GUARDED_BY(mutex_);
 };
 
@@ -281,6 +308,7 @@ Cache::Handle* LRUCache::Insert(const Slice& key, uint32_t hash, void* value,
   e->refs = 1;  // for the returned handle.
   std::memcpy(e->key_data, key.data(), key.size());
 
+  // 有可能没有开启缓存，会出现 capacity = 0 的情况
   if (capacity_ > 0) {
     e->refs++;  // for the cache's reference.
     e->in_cache = true;
@@ -291,6 +319,7 @@ Cache::Handle* LRUCache::Insert(const Slice& key, uint32_t hash, void* value,
     // next is read by key() in an assert, so it must be initialized
     e->next = nullptr;
   }
+  // 插入 LRU 导致 usage_ 大于容量，清除部分缓存
   while (usage_ > capacity_ && lru_.next != &lru_) {
     LRUHandle* old = lru_.next;
     assert(old->refs == 1);
@@ -321,6 +350,7 @@ void LRUCache::Erase(const Slice& key, uint32_t hash) {
   FinishErase(table_.Remove(key, hash));
 }
 
+// 清空 lru 链
 void LRUCache::Prune() {
   MutexLock l(&mutex_);
   while (lru_.next != &lru_) {
