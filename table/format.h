@@ -20,9 +20,11 @@ struct ReadOptions;
 
 // BlockHandle is a pointer to the extent of a file that stores a data
 // block or a meta block.
+// BlockHandle 是指向数据块或者元块的偏移量和大小
 class BlockHandle {
  public:
   // Maximum encoding length of a BlockHandle
+  // Varint64 最多需要 10 字节来存储 64 / 7 = 10 向上取整
   enum { kMaxEncodedLength = 10 + 10 };
 
   BlockHandle();
@@ -45,6 +47,10 @@ class BlockHandle {
 
 // Footer encapsulates the fixed information stored at the tail
 // end of every table file.
+// Footer 分装了固定的信息储存在每个 table 文件的尾部
+// +------------------+--------------+---------+----------+
+// | metaindex_handle | index_handle | Padding | MagicNum |
+// +------------------+--------------+---------+----------+
 class Footer {
  public:
   // Encoded length of a Footer.  Note that the serialization of a
@@ -78,6 +84,7 @@ static const uint64_t kTableMagicNumber = 0xdb4775248b80fb57ull;
 // 1-byte type + 32-bit crc
 static const size_t kBlockTrailerSize = 5;
 
+// Slice data, bool cachable, bool heap_allocated
 struct BlockContents {
   Slice data;           // Actual contents of data
   bool cachable;        // True iff data can be cached
