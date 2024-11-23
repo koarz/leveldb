@@ -23,6 +23,7 @@ Iterator::~Iterator() {
   }
 }
 
+// 创建节点放在 Cleanup 对象里 以后(析构)统一清理
 void Iterator::RegisterCleanup(CleanupFunction func, void* arg1, void* arg2) {
   assert(func != nullptr);
   CleanupNode* node;
