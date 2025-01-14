@@ -48,7 +48,8 @@ class LEVELDB_EXPORT WriteBatch {
   ~WriteBatch();
 
   // Store the mapping "key->value" in the database.
-  // 一个 WriteBatch 应该只调用一次 Put，其中 count + 1 是加了 ValueType 占用的字节
+  // 一个 WriteBatch 应该只调用一次 Put，其中 count + 1 是加了 ValueType
+  // 占用的字节
   void Put(const Slice& key, const Slice& value);
 
   // If the database contains a mapping for "key", erase it.  Else do nothing.
@@ -78,7 +79,7 @@ class LEVELDB_EXPORT WriteBatch {
   friend class WriteBatchInternal;
 
   // +------------------+------------------------------+
-  // |       KHeader    |            entry             |
+  // |      KHeader     |            entry             |
   // +----------+-------+------------+--------+--------+
   // | sequence | count | value type | length |  data  |
   // +----------+-------+------------+--------+--------+
