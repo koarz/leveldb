@@ -14,6 +14,7 @@
 #include "leveldb/filter_policy.h"
 #include "leveldb/slice.h"
 #include "leveldb/table_builder.h"
+
 #include "util/coding.h"
 #include "util/logging.h"
 
@@ -131,6 +132,9 @@ class InternalFilterPolicy : public FilterPolicy {
 // Modules in this directory should keep internal keys wrapped inside
 // the following class instead of plain strings so that we do not
 // incorrectly use string comparisons instead of an InternalKeyComparator.
+// +-------------------+-------------------------+
+// | SliceDataToString | (sequence << 8 | vtype) |
+// +-------------------+-------------------------+
 class InternalKey {
  private:
   std::string rep_;
