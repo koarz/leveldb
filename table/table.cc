@@ -9,6 +9,7 @@
 #include "leveldb/env.h"
 #include "leveldb/filter_policy.h"
 #include "leveldb/options.h"
+
 #include "table/block.h"
 #include "table/filter_block.h"
 #include "table/format.h"
@@ -47,7 +48,7 @@ Status Table::Open(const Options& options, RandomAccessFile* file,
   Status s = file->Read(size - Footer::kEncodedLength, Footer::kEncodedLength,
                         &footer_input, footer_space);
   if (!s.ok()) return s;
-
+  // 先读取 footer
   Footer footer;
   s = footer.DecodeFrom(&footer_input);
   if (!s.ok()) return s;
@@ -58,6 +59,7 @@ Status Table::Open(const Options& options, RandomAccessFile* file,
   if (options.paranoid_checks) {
     opt.verify_checksums = true;
   }
+  // 读取 index block 的内容
   s = ReadBlock(file, opt, footer.index_handle(), &index_block_contents);
 
   if (s.ok()) {
@@ -79,6 +81,7 @@ Status Table::Open(const Options& options, RandomAccessFile* file,
   return s;
 }
 
+// 主要是读取过滤器
 void Table::ReadMeta(const Footer& footer) {
   if (rep_->options.filter_policy == nullptr) {
     return;  // Do not need any metadata
@@ -133,6 +136,7 @@ void Table::ReadFilter(const Slice& filter_handle_value) {
 
 Table::~Table() { delete rep_; }
 
+// 为什么这里要有一个 ignore 参数而不是直接不写
 static void DeleteBlock(void* arg, void* ignored) {
   delete reinterpret_cast<Block*>(arg);
 }
@@ -194,6 +198,7 @@ Iterator* Table::BlockReader(void* arg, const ReadOptions& options,
   Iterator* iter;
   if (block != nullptr) {
     iter = block->NewIterator(table->rep_->options.comparator);
+    // iterator 类中维护了一个 Cleanup 对象 由这个对象进行统一清理而不是直接清理
     if (cache_handle == nullptr) {
       iter->RegisterCleanup(&DeleteBlock, block, nullptr);
     } else {
@@ -221,6 +226,7 @@ Status Table::InternalGet(const ReadOptions& options, const Slice& k, void* arg,
     Slice handle_value = iiter->value();
     FilterBlockReader* filter = rep_->filter;
     BlockHandle handle;
+    // 这里使用过滤器判断了
     if (filter != nullptr && handle.DecodeFrom(&handle_value).ok() &&
         !filter->KeyMayMatch(handle.offset(), k)) {
       // Not found
