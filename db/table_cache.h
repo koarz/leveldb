@@ -7,12 +7,13 @@
 #ifndef STORAGE_LEVELDB_DB_TABLE_CACHE_H_
 #define STORAGE_LEVELDB_DB_TABLE_CACHE_H_
 
+#include "db/dbformat.h"
 #include <cstdint>
 #include <string>
 
-#include "db/dbformat.h"
 #include "leveldb/cache.h"
 #include "leveldb/table.h"
+
 #include "port/port.h"
 
 namespace leveldb {
@@ -53,6 +54,7 @@ class TableCache {
   Env* const env_;
   const std::string dbname_;
   const Options& options_;
+  // 默认使用 LRUCache
   Cache* cache_;
 };
 

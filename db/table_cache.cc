@@ -5,8 +5,10 @@
 #include "db/table_cache.h"
 
 #include "db/filename.h"
+
 #include "leveldb/env.h"
 #include "leveldb/table.h"
+
 #include "util/coding.h"
 
 namespace leveldb {
@@ -16,6 +18,7 @@ struct TableAndFile {
   Table* table;
 };
 
+// value 是 TableAndFile 对象，没用到 key
 static void DeleteEntry(const Slice& key, void* value) {
   TableAndFile* tf = reinterpret_cast<TableAndFile*>(value);
   delete tf->table;
@@ -38,6 +41,7 @@ TableCache::TableCache(const std::string& dbname, const Options& options,
 
 TableCache::~TableCache() { delete cache_; }
 
+// 将要找的 table 放在缓存里边
 Status TableCache::FindTable(uint64_t file_number, uint64_t file_size,
                              Cache::Handle** handle) {
   Status s;
@@ -45,12 +49,15 @@ Status TableCache::FindTable(uint64_t file_number, uint64_t file_size,
   EncodeFixed64(buf, file_number);
   Slice key(buf, sizeof(buf));
   *handle = cache_->Lookup(key);
+  // *handle 不是 nullptr 说明找到了
   if (*handle == nullptr) {
     std::string fname = TableFileName(dbname_, file_number);
     RandomAccessFile* file = nullptr;
     Table* table = nullptr;
+    // 文件名以 ldb 结尾
     s = env_->NewRandomAccessFile(fname, &file);
     if (!s.ok()) {
+      // sstable 文件
       std::string old_fname = SSTTableFileName(dbname_, file_number);
       if (env_->NewRandomAccessFile(old_fname, &file).ok()) {
         s = Status::OK();
